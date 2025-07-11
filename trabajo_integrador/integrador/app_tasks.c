@@ -5,6 +5,9 @@ xQueueHandle queue_adc;
 // Cola para datos de luminosidad
 xQueueHandle queue_lux;
 
+xQueueHandle queue_display;
+xQueueHandle queue_display_control;
+
 // Cola para el valor de setpoint
 xQueueHandle queue_setpoint;
 
@@ -12,7 +15,7 @@ xQueueHandle queue_setpoint;
 xSemaphoreHandle semphr_buzz;
 // Semáforo para contador
 xSemaphoreHandle semphr_counter;
-
+xSemaphoreHandle semphr_usr;
 
 // Handler para la tarea de display write
 TaskHandle_t handle_display;
@@ -23,6 +26,7 @@ TaskHandle_t handle_display;
 void task_init(void *params) {
 	// Inicializo semáforos
 	semphr_buzz = xSemaphoreCreateBinary();
+	semphr_usr = xSemaphoreCreateBinary();
 	semphr_counter = xSemaphoreCreateCounting(50, 25);
 
 
@@ -30,7 +34,8 @@ void task_init(void *params) {
 	queue_adc = xQueueCreate(1, sizeof(adc_data_t));
 	queue_lux = xQueueCreate(1, sizeof(uint16_t));
 	queue_setpoint = xQueueCreate(1, sizeof(uint16_t));
-
+	queue_display = xQueueCreate(1, sizeof(uint8_t));
+	queue_display_control = xQueueCreate(1, sizeof(bool));
 	// Inicializacion de GPIO
 	wrapper_gpio_init(0);
 	wrapper_gpio_init(1);
@@ -46,8 +51,7 @@ void task_init(void *params) {
 	wrapper_display_init();
 	// Configuro botones
 	wrapper_btn_init();
-	// Configuro interrupción por flancos para el infrarojo y para el botón del user
-	wrapper_gpio_enable_irq((gpio_t){CNY70}, kPINT_PinIntEnableBothEdges, cny70_callback);
+
 
 	// Inicializo el PWM
 	wrapper_pwm_init();
@@ -58,6 +62,7 @@ void task_init(void *params) {
 
 	// Elimino tarea para liberar recursos
 	vTaskDelete(NULL);
+
 }
 
 /**
@@ -78,18 +83,23 @@ void task_adc(void *params) {
  */
 void task_display(void *params) {
 	// Variable con el dato para escribir
-	uint8_t data;
-
+	uint16_t data;
+	bool control = false;
 	while(1) {
 		// Mira el dato que haya en la cola
-		if(!xQueuePeek(queue_lux, &data, pdMS_TO_TICKS(100))) { continue; }
+		xQueuePeek(queue_display_control, &control, pdMS_TO_TICKS(100));
+		if(control){
+			xQueuePeek(queue_setpoint, &data, pdMS_TO_TICKS(100));
+		} 
+		else {
+			xQueuePeek(queue_lux, &data, pdMS_TO_TICKS(100));}
 		// Muestro el número
 		wrapper_display_off();
-		wrapper_display_write((uint8_t)(data / 10));
+		wrapper_display_write((uint8_t)(data / 10), control);
 		wrapper_display_on((gpio_t){COM_1});
 		vTaskDelay(pdMS_TO_TICKS(10));
 		wrapper_display_off();
-		wrapper_display_write((uint8_t)(data % 10));
+		wrapper_display_write((uint8_t)(data % 10), control);
 		wrapper_display_on((gpio_t){COM_2});
 		vTaskDelay(pdMS_TO_TICKS(10));
 	}
@@ -119,6 +129,31 @@ void task_pwm(void *params) {
 		vTaskDelay(pdMS_TO_TICKS(20));}
 }
 
+void task_tricolour(void *params) {
+	// Variable para guardar los datos del ADC
+	uint16_t data;
+	uint16_t setpoint;
+
+	while(1) {
+		// Bloqueo hasta que haya algo que leer
+		xQueuePeek(queue_lux, &data, portMAX_DELAY);
+		xQueuePeek(queue_setpoint, &setpoint, portMAX_DELAY);
+		int16_t err = data - setpoint;
+		// Actualizo el duty
+		if(err >0) {
+			// Referencia por arriba, quiero calentar -> LED rojo
+			wrapper_pwm_update_bled(0);
+			wrapper_pwm_update_rled(err);
+		}
+		else {
+			// Referencia por debajo, quiero enfriar -> LED azul
+			wrapper_pwm_update_rled(0);
+			wrapper_pwm_update_bled(-err);
+		}
+		vTaskDelay(pdMS_TO_TICKS(20));
+	}
+}
+
 /**
  * @brief Lee periodicamente el valor de intensidad luminica
  */
@@ -138,21 +173,60 @@ void task_bh1750(void *params) {
 	}
 }
 
-
 /**
- * @brief Tarea que parpadea el LED de acuerdo a la intensidad lumínica
+ * @brief Lee los valores de los botones para definir que valor mostrar
  */
-
-/**
- * @brief Tarea que hace sonar el buzzer
- */
-void task_buzzer(void *params) {
+void task_display_change(void *params) {
+	// Dato para pasar
+	bool status= false;
 
 	while(1) {
-		// Intenta tomar el semáforo
-		xSemaphoreTake(semphr_buzz, portMAX_DELAY);
-		// Conmuto el buzzer
-		wrapper_output_toggle((gpio_t){BUZZER});
+		xSemaphoreTake(semphr_usr, portMAX_DELAY);
+		xQueuePeek(queue_display_control, &status, pdMS_TO_TICKS(100));
+		// Escribe el dato en la cola
+		bool new_status = !status;
+		xQueueOverwrite(queue_display_control, &new_status);
+		vTaskDelay(pdMS_TO_TICKS(50));
+}}
+
+// Deteccion de botton
+void task_usr(void *params) {
+
+	while(1){
+		
+		if(!GPIO_PinRead(USR_BTN)) {
+			vTaskDelay(pdMS_TO_TICKS(50));
+			if(GPIO_PinRead(USR_BTN)) {
+				// Flanco ascendente
+				xSemaphoreGive(semphr_usr);
+			}
+		} else {continue;}
+
+		vTaskDelay(pdMS_TO_TICKS(10));
+	}
+
+}
+
+
+void task_buzzer(void *params) {
+
+	while(1){
+		
+		if(!GPIO_PinRead(CNY70)) {
+			vTaskDelay(pdMS_TO_TICKS(50));
+			if(GPIO_PinRead(CNY70)) {
+				// Flanco ascendente
+				wrapper_output_toggle((gpio_t){BUZZER});
+			}
+		} else {
+			vTaskDelay(pdMS_TO_TICKS(50));
+			if(!GPIO_PinRead(CNY70)) {
+				// Flanco descendente
+				wrapper_output_toggle((gpio_t){BUZZER});
+			}
+		}
+
+		vTaskDelay(pdMS_TO_TICKS(1));
 	}
 }
 
@@ -179,10 +253,10 @@ void task_counter_btns(void *params) {
 			xSemaphoreGive(semphr_counter);
 		}
 		// Escribe en el display
-		uint16_t data = uxSemaphoreGetCount(semphr_counter);
+		uint16_t data = uxSemaphoreGetCount(semphr_counter) + 25;
 		xQueueOverwrite(queue_setpoint, &data);
 		// Demora chica para evitar que detecte muy rápido que se presionó
-		vTaskDelay(pdMS_TO_TICKS(30));
+		vTaskDelay(pdMS_TO_TICKS(100));
 
 	}
 }
@@ -202,7 +276,7 @@ void task_ShowValues(void *params){
 		
 		PRINTF("Ticks: %ld ms\n", tiempo_ms);
 		PRINTF("El porcentaje luminico es: %d\n", porcentaje);
-		PRINTF("El porcentaje del setpoint es: %d\n", control+25);
+		PRINTF("El porcentaje del setpoint es: %d\n", control);
 		PRINTF("El porcentaje del brillo del LED D1: %d\n", duty);
 
 		vTaskDelay(500);

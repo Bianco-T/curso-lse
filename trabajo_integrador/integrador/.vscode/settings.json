@@ -5,9 +5,5 @@
   "cmake.useCMakePresets": "always",
   "cmake.buildTask": true,
   "cmake.skipConfigureIfCachePresent": true,
-  "cmake.sourceDirectory": "${workspaceFolder}/armgcc",
-  "mcuxpresso.debug.warnProbeInUse": false,
-  "files.associations": {
-    "app_tasks.h": "c"
-  }
+  "cmake.sourceDirectory": "${workspaceFolder}/armgcc"
 }

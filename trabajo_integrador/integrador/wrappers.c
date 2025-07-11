@@ -1,7 +1,7 @@
 #include "wrappers.h"
 
 // Variable privada para registrar el evento del PWM
-static uint32_t pwm_bled_event = 0, pwm_rled_event = 0;
+static uint32_t pwm_bled_event = 0, pwm_rled_event = 0, pwm_gled_event = 0;
 
 /**
  * @brief Wrapper para inicializacion del ADC
@@ -62,23 +62,6 @@ void wrapper_btn_init(void) {
 }
 
 /**
- * @brief Wrapper para habilitar una interrupción en una entrada
- * @param gpio estructura de GPIO
- * @param edge kPINT_PinIntEnableRiseEdge, kPINT_PinIntEnableFallEdge, kPINT_PinIntEnableBothEdges
- */
-void wrapper_gpio_enable_irq(gpio_t gpio, pint_pin_enable_t edge, pint_cb_t callback) {
-	// Variable para guardar el numero de interrupción
-	static uint32_t pint_n = 0;
-	// Solo la primera vez que se configura la interrupción
-	if(pint_n == 0) { PINT_Init(PINT); }
-	// Asigno el pin a la interrupción
-	SYSCON->PINTSEL[pint_n] = wrapper_gpio_get_pin(gpio);
-	// PINT interrupt para el flanco indicado
-	PINT_PinInterruptConfig(PINT, (pint_pin_int_t)pint_n, edge, callback);
-	PINT_EnableCallbackByIndex(PINT, (pint_pin_int_t)pint_n++);
-}
-
-/**
  * @brief Wrapper para inicializacion del display 7 segmentos
  */
 void wrapper_display_init(void) {
@@ -94,7 +77,7 @@ void wrapper_display_init(void) {
  * @brief Escribe el numero de un digito en el display
  * @param number es el numero que se quiere escribir
  */
-void wrapper_display_write(uint8_t number) {
+void wrapper_display_write(uint8_t number, bool show_dp) {
 	// Array con valores para los pines
 	uint8_t values[] = { ~0x3f, ~0x6, ~0x5b, ~0x4f, ~0x66, ~0x6d, ~0x7d, ~0x7, ~0x7f, ~0x6f };
 	// Array con los segmentos
@@ -114,13 +97,14 @@ void wrapper_pwm_init(void) {
 	// Conecto la salida 4 del SCT al LED azul
     CLOCK_EnableClock(kCLOCK_Swm);
     SWM_SetMovablePinSelect(SWM0, kSWM_SCT_OUT0, kSWM_PortPin_P0_29);
-
+	SWM_SetMovablePinSelect(SWM0, kSWM_SCT_OUT1, kSWM_PortPin_P1_1);
+	SWM_SetMovablePinSelect(SWM0, kSWM_SCT_OUT2, kSWM_PortPin_P1_2);
     CLOCK_DisableClock(kCLOCK_Swm);
 
     // Eligo el clock para el Timer
     uint32_t sctimer_clock = CLOCK_GetFreq(kCLOCK_Fro);
     // Configuracion del SCT Timer
-    sctimer_config_t sctimer_config;
+    sctimer_config_t sctimer_config; 
     SCTIMER_GetDefaultConfig(&sctimer_config);
     SCTIMER_Init(SCT0, &sctimer_config);
 
@@ -157,6 +141,20 @@ void wrapper_pwm_init(void) {
 			sctimer_clock,
 			&pwm_rled_event
 		);
+	sctimer_pwm_signal_param_t gled_pwm_config = {
+		.output = kSCTIMER_Out_2,
+		.level = kSCTIMER_LowTrue,
+		.dutyCyclePercent = 0
+	};
+
+	SCTIMER_SetupPwm(
+		SCT0,
+		&gled_pwm_config,
+		kSCTIMER_CenterAlignedPwm,
+		1000,
+		sctimer_clock,
+		&pwm_gled_event
+	);
 
     // Inicializo el Timer
     SCTIMER_StartTimer(SCT0, kSCTIMER_Counter_U);
@@ -181,14 +179,16 @@ static void wrapper_pwm_update_led(sctimer_out_t out, int16_t duty, uint32_t eve
  */
 void wrapper_pwm_update_bled(int16_t duty) {
 	// Invoco al wrapper general
-	wrapper_pwm_update_led(kSCTIMER_Out_0, duty, pwm_bled_event);
+	wrapper_pwm_update_led(kSCTIMER_Out_1, duty, pwm_rled_event);
 }
-//Mine
 
 /**
  * @brief Wrapper para actualizar el valor de duty del PWM del LED rojo
  */
-
+void wrapper_pwm_update_rled(int16_t duty) {
+	// Invoco al wrapper general
+	wrapper_pwm_update_led(kSCTIMER_Out_2, duty, pwm_gled_event);
+}
 
 /**
  * @brief Wrapper que inicializa el I2C
